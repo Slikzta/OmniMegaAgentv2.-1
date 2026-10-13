@@ -2,14 +2,14 @@ import React, { useState, useEffect, useRef } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
 import { useAuthState } from 'react-firebase-hooks/auth';
 import { auth, db } from '../lib/firebase';
-import { collection, addDoc, getDocs, query, orderBy, limit } from 'firebase/firestore';
+import { collection, addDoc } from 'firebase/firestore';
 import { Button } from './ui/button';
-import { Card } from './ui/card';
 import { Mic, MicOff, Loader2, Sparkles, AlertCircle, RefreshCw, Volume2, MessageSquare } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
 import { toast } from 'sonner';
 import { SIERRA_CORE_PERSONA } from '../lib/persona';
+import { fetchLiveVoiceToken } from '../lib/providers';
 
 interface TranscriptItem {
   id: string;
@@ -32,12 +32,20 @@ export default function LiveVoice() {
 
   const sessionRef = useRef<any>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const playbackContextRef = useRef<AudioContext | null>(null);
+  const nextPlayTimeRef = useRef<number>(0);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
   const transcriptBufferRef = useRef<string>('');
   const speechRecognitionRef = useRef<any>(null);
+  const isSpeakingRef = useRef<boolean>(false);
+
+  // Keep ref synchronized with state to prevent race conditions in Web Audio callbacks
+  useEffect(() => {
+    isSpeakingRef.current = isSpeaking;
+  }, [isSpeaking]);
 
   // Auto-scroll transcript container
   const transcriptEndRef = useRef<HTMLDivElement>(null);
@@ -60,7 +68,7 @@ export default function LiveVoice() {
         content: text,
         timestamp: Date.now(),
         isVoice: true,
-        modelName: 'Sierra Live Neural Voice'
+        modelName: 'Sierra Live Neural Voice',
       });
     } catch (err) {
       console.warn("Could not save live voice transcript to Firestore:", err);
@@ -72,14 +80,27 @@ export default function LiveVoice() {
     setConnectionError(null);
 
     try {
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) {
-        throw new Error("Missing Gemini API configuration. Please verify credentials.");
+      // 1. Fetch short-lived ephemeral token from secure server endpoint
+      let liveToken: string;
+      try {
+        liveToken = await fetchLiveVoiceToken();
+      } catch (tokenErr: any) {
+        throw new Error(
+          tokenErr.message || "Failed to initialize Live Voice session. Please verify your Gemini API key in Settings."
+        );
       }
 
-      // Check microphone permission first before connecting
+      // 2. Request user microphone with hardware Acoustic Echo Cancellation enabled
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            channelCount: 1,
+            sampleRate: 16000,
+          },
+        });
         mediaStreamRef.current = stream;
       } catch (micErr: any) {
         if (micErr.name === 'NotAllowedError' || micErr.name === 'PermissionDeniedError') {
@@ -88,16 +109,16 @@ export default function LiveVoice() {
         throw new Error("Unable to access microphone: " + (micErr.message || "Device error"));
       }
 
-      const ai = new GoogleGenAI({ apiKey });
+      // 3. Connect to Gemini Live using the ephemeral token
+      const ai = new GoogleGenAI({ apiKey: liveToken });
 
-      // Build live prompt emphasizing conversational presence and natural speech
       const liveSystemInstruction = `${SIERRA_CORE_PERSONA}
 
 Current Modality: LIVE TWO-WAY SPOKEN AUDIO
-Specific Spoken Guidelines:
-- Keep your answers naturally concise (1-3 sentences in spontaneous flow) so the conversation moves like a natural phone or in-person chat.
-- Speak smoothly and warmly without robotic introductions or canned sign-offs.
-- Listen actively and respond directly to what the user says.`;
+Spoken Interaction Rules:
+- Keep answers naturally conversational and concise (1-3 sentences) so dialogue flows smoothly like a real phone call or in-person talk.
+- Speak warmly and directly. No robotic pleasantries or repetitive greetings.
+- Listen actively and respond directly to what the user shares.`;
 
       const session = await ai.live.connect({
         model: "gemini-3.1-flash-live-preview",
@@ -118,7 +139,7 @@ Specific Spoken Guidelines:
             toast.success("Sierra is listening!");
           },
           onmessage: (message: LiveServerMessage) => {
-            // Handle audio response
+            // Handle audio response chunk
             if (message.serverContent?.modelTurn?.parts) {
               for (const part of message.serverContent.modelTurn.parts) {
                 if (part.inlineData?.data) {
@@ -138,7 +159,7 @@ Specific Spoken Guidelines:
                   id: 'sierra-' + Date.now(),
                   sender: 'sierra',
                   text: completedText,
-                  timestamp: Date.now()
+                  timestamp: Date.now(),
                 };
                 setTranscripts(prev => [...prev.slice(-20), item]);
                 persistVoiceMessage('sierra', completedText);
@@ -146,7 +167,7 @@ Specific Spoken Guidelines:
               transcriptBufferRef.current = '';
             }
 
-            // Handle interruption / barge-in
+            // Handle barge-in / user interruption
             if (message.serverContent?.interrupted) {
               stopPlayback();
             }
@@ -159,8 +180,8 @@ Specific Spoken Guidelines:
             console.error("Live API Error:", err);
             setConnectionError(err?.message || "Live connection interrupted. Please tap Reconnect.");
             stopSession();
-          }
-        }
+          },
+        },
       });
 
       sessionRef.current = session;
@@ -177,13 +198,14 @@ Specific Spoken Guidelines:
     setIsActive(false);
     setIsConnecting(false);
     setIsSpeaking(false);
+    isSpeakingRef.current = false;
     setUserSpeechDetected(false);
 
     if (sessionRef.current) {
       try {
         sessionRef.current.close();
       } catch (e) {
-        // ignore close errors
+        // ignore
       }
       sessionRef.current = null;
     }
@@ -204,6 +226,9 @@ Specific Spoken Guidelines:
       recognition.lang = 'en-US';
 
       recognition.onresult = (event: any) => {
+        // If Sierra is currently speaking through the speakers, suppress transcription to avoid acoustic loop
+        if (isSpeakingRef.current) return;
+
         let finalPhrase = '';
         for (let i = event.resultIndex; i < event.results.length; ++i) {
           if (event.results[i].isFinal) {
@@ -215,7 +240,7 @@ Specific Spoken Guidelines:
             id: 'user-' + Date.now(),
             sender: 'user',
             text: finalPhrase.trim(),
-            timestamp: Date.now()
+            timestamp: Date.now(),
           };
           setTranscripts(prev => [...prev.slice(-20), item]);
           persistVoiceMessage('user', finalPhrase.trim());
@@ -223,7 +248,7 @@ Specific Spoken Guidelines:
       };
 
       recognition.onerror = () => {
-        // Soft-fail recognition; raw audio still streams to Gemini Live
+        // Soft-fail recognition; audio still streams directly to Gemini Live
       };
 
       recognition.start();
@@ -246,7 +271,15 @@ Specific Spoken Guidelines:
 
   const startAudioCapture = async () => {
     try {
-      const stream = mediaStreamRef.current || await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = mediaStreamRef.current || await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+          sampleRate: 16000,
+        },
+      });
       mediaStreamRef.current = stream;
 
       const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
@@ -260,7 +293,7 @@ Specific Spoken Guidelines:
       processorRef.current = processor;
 
       processor.onaudioprocess = (e) => {
-        // In push mode, only send if user is holding button
+        // Push mode check
         if (mode === 'push' && !isPushing) {
           setUserSpeechDetected(false);
           return;
@@ -278,12 +311,17 @@ Specific Spoken Guidelines:
         const avg = sum / inputData.length;
         setUserSpeechDetected(avg > 0.02);
 
+        // Acoustic Echo Guard: If Sierra is speaking, suppress mic unless user speaks loudly (barge-in)
+        if (isSpeakingRef.current && avg < 0.08) {
+          return;
+        }
+
         const base64Data = btoa(String.fromCharCode(...new Uint8Array(pcmData.buffer)));
 
         if (sessionRef.current) {
           try {
             sessionRef.current.sendRealtimeInput({
-              audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
+              audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' },
             });
           } catch (sendErr) {
             console.warn("Failed sending audio chunk:", sendErr);
@@ -291,8 +329,14 @@ Specific Spoken Guidelines:
         }
       };
 
+      // CRITICAL FIX: Connect to an isolated zero-gain node so microphone audio
+      // NEVER plays back into the room through the speakers, avoiding any audio feedback loop!
+      const muteNode = audioCtx.createGain();
+      muteNode.gain.setValueAtTime(0, audioCtx.currentTime);
+
       source.connect(processor);
-      processor.connect(audioCtx.destination);
+      processor.connect(muteNode);
+      muteNode.connect(audioCtx.destination);
     } catch (error: any) {
       console.error("Audio capture initialization error:", error);
       setConnectionError("Microphone hardware error: " + (error.message || "Failed to initialize audio."));
@@ -322,8 +366,11 @@ Specific Spoken Guidelines:
     }
   };
 
-  const playAudio = (base64Data: string) => {
+  // CRITICAL FIX: Single persistent AudioContext and timeline queue to eliminate AudioContext leaks and freezing
+  const playAudio = async (base64Data: string) => {
     setIsSpeaking(true);
+    isSpeakingRef.current = true;
+
     try {
       const binaryString = atob(base64Data);
       const bytes = new Uint8Array(binaryString.length);
@@ -336,7 +383,16 @@ Specific Spoken Guidelines:
         floatData[i] = pcmData[i] / 0x7FFF;
       }
 
-      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      // Re-use single persistent playback AudioContext
+      if (!playbackContextRef.current || playbackContextRef.current.state === 'closed') {
+        playbackContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      }
+
+      const audioCtx = playbackContextRef.current;
+      if (audioCtx.state === 'suspended') {
+        await audioCtx.resume();
+      }
+
       const buffer = audioCtx.createBuffer(1, floatData.length, 24000);
       buffer.getChannelData(0).set(floatData);
 
@@ -346,17 +402,22 @@ Specific Spoken Guidelines:
 
       activeSourcesRef.current.push(source);
 
+      // Schedule continuously on timeline for gap-free playback
+      const startTime = Math.max(audioCtx.currentTime, nextPlayTimeRef.current);
+      source.start(startTime);
+      nextPlayTimeRef.current = startTime + buffer.duration;
+
       source.onended = () => {
         activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== source);
         if (activeSourcesRef.current.length === 0) {
           setIsSpeaking(false);
+          isSpeakingRef.current = false;
         }
       };
-
-      source.start();
     } catch (playbackErr) {
       console.error("Audio playback error:", playbackErr);
       setIsSpeaking(false);
+      isSpeakingRef.current = false;
     }
   };
 
@@ -369,7 +430,9 @@ Specific Spoken Guidelines:
       }
     });
     activeSourcesRef.current = [];
+    nextPlayTimeRef.current = 0;
     setIsSpeaking(false);
+    isSpeakingRef.current = false;
   };
 
   return (

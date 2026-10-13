@@ -2,7 +2,8 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useAuthState } from 'react-firebase-hooks/auth';
 import { auth, db } from '../lib/firebase';
 import { collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, doc, updateDoc, deleteDoc, getDocs, getDoc, setDoc } from 'firebase/firestore';
-import { getGeminiAI, MODELS } from '../lib/gemini';
+import { MODELS } from '../lib/gemini';
+import { streamChat, generateMediaImage, generateMediaVideo } from '../lib/providers';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { ScrollArea } from './ui/scroll-area';
@@ -343,7 +344,7 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
 
 import { useUI } from '../contexts/UIContext';
 
-export default function ChatInterface() {
+export default function ChatInterface({ onOpenSettings }: { onOpenSettings?: () => void } = {}) {
   const [user] = useAuthState(auth);
   const { 
     isSidebarOpen, setIsSidebarOpen, toggleSidebar,
@@ -441,39 +442,29 @@ export default function ChatInterface() {
     setGeneratedImageUrl(null);
 
     try {
-      const ai = getGeminiAI();
-      const response = await ai.models.generateContent({
+      const url = await generateMediaImage({
+        prompt: imagePrompt,
+        aspectRatio: imageAspectRatio,
+        imageSize: imageQuality,
+        personGeneration: imagePersonGeneration,
         model: imageModel,
-        contents: { parts: [{ text: imagePrompt }] },
-        config: {
-          imageConfig: {
-            aspectRatio: imageAspectRatio as any,
-            imageSize: imageQuality as any,
-            personGeneration: imagePersonGeneration as any,
-            outputMimeType: imageFormat,
-          }
-        }
       });
 
-      const imagePart = response.candidates?.[0]?.content?.parts.find(p => p.inlineData);
-      if (imagePart?.inlineData) {
-        const url = `data:image/png;base64,${imagePart.inlineData.data}`;
-        setGeneratedImageUrl(url);
-        
-        // Save to chat
-        if (user) {
-          await addDoc(collection(db, `users/${user.uid}/sessions/${sessionId}/messages`), {
-            role: 'model',
-            content: `Generated image for: "${imagePrompt}"`,
-            timestamp: Date.now(),
-            attachments: [url]
-          });
-        }
-        toast.success("Image generated and added to chat!");
+      setGeneratedImageUrl(url);
+      
+      // Save to chat
+      if (user) {
+        await addDoc(collection(db, `users/${user.uid}/sessions/${sessionId}/messages`), {
+          role: 'model',
+          content: `Generated image for: "${imagePrompt}"`,
+          timestamp: Date.now(),
+          attachments: [url]
+        });
       }
-    } catch (error) {
+      toast.success("Image generated and added to chat!");
+    } catch (error: any) {
       console.error("Image generation error:", error);
-      toast.error("Failed to generate image.");
+      toast.error(error.message || "Failed to generate image.");
     } finally {
       setIsGeneratingImage(false);
     }
@@ -495,65 +486,43 @@ export default function ChatInterface() {
   const handleGenerateVideo = async () => {
     if (!videoPrompt.trim() || isGeneratingVideo) return;
     setIsGeneratingVideo(true);
-    setVideoProgress(0);
+    setVideoProgress(15);
     setGeneratedVideoUrl(null);
 
     try {
-      const ai = getGeminiAI();
-      let operation = await ai.models.generateVideos({
-        model: videoModel,
-        prompt: videoPrompt,
-        config: {
-          numberOfVideos: 1,
-          aspectRatio: videoAspectRatio as any,
-          resolution: videoResolution as any,
-          fps: videoFps,
-        }
-      });
-
-      // Poll for completion
-      while (!operation.done) {
+      const progressInterval = setInterval(() => {
         setVideoProgress(prev => {
-          if (prev === null) return 5;
-          if (prev < 90) return prev + 5;
+          if (prev === null) return 15;
+          if (prev < 90) return prev + 10;
           return prev;
         });
-        await new Promise(resolve => setTimeout(resolve, 10000));
-        operation = await ai.operations.getVideosOperation({ operation: operation });
-      }
+      }, 7000);
 
+      const videoUrl = await generateMediaVideo({
+        prompt: videoPrompt,
+        aspectRatio: videoAspectRatio,
+        resolution: videoResolution,
+        fps: videoFps,
+        model: videoModel,
+      });
+
+      clearInterval(progressInterval);
       setVideoProgress(100);
-      const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
-      if (downloadLink) {
-        // Fetch the video using the API key
-        const response = await fetch(downloadLink, {
-          method: 'GET',
-          headers: {
-            'x-goog-api-key': process.env.GEMINI_API_KEY as string,
-          },
-        });
-        const blob = await response.blob();
-        const videoUrl = URL.createObjectURL(blob);
-        setGeneratedVideoUrl(videoUrl);
+      setGeneratedVideoUrl(videoUrl);
 
-        // Save to chat
-        if (user) {
-          await addDoc(collection(db, `users/${user.uid}/sessions/${sessionId}/messages`), {
-            role: 'model',
-            content: `Generated video for: "${videoPrompt}"`,
-            videoUrl: videoUrl,
-            timestamp: Date.now(),
-            // We can't easily save the blob to Firestore, but we can save the prompt
-            // In a production app, we'd upload the blob to Firebase Storage first
-          });
-        }
-        toast.success("Video generated and added to chat!");
-      } else {
-        throw new Error("No video data received");
+      // Save to chat
+      if (user) {
+        await addDoc(collection(db, `users/${user.uid}/sessions/${sessionId}/messages`), {
+          role: 'model',
+          content: `Generated video for: "${videoPrompt}"`,
+          videoUrl: videoUrl,
+          timestamp: Date.now(),
+        });
       }
-    } catch (error) {
+      toast.success("Video generated and added to chat!");
+    } catch (error: any) {
       console.error("Video generation error:", error);
-      toast.error("Failed to generate video.");
+      toast.error(error.message || "Failed to generate video.");
     } finally {
       setIsGeneratingVideo(false);
       setVideoProgress(null);
@@ -866,61 +835,23 @@ export default function ChatInterface() {
         handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}/sessions/${sessionId}/messages`);
       }
 
-      // Call Gemini with streaming
-      const ai = getGeminiAI();
-      const tools: any[] = [];
-      if (useSearch) tools.push({ googleSearch: {} });
-      if (useMaps) tools.push({ googleMaps: {} });
-
-      // Prepare contents for Gemini
-      let contents = [];
-      
+      // Prepare contents for Chat
+      let formattedMessages: { role: string; content: string; attachments?: string[] }[] = [];
       if (isMultiTurn) {
-        contents = messages.map(m => ({
+        formattedMessages = messages.map(m => ({
           role: m.role,
-          parts: [
-            { text: m.content },
-            ...(m.attachments || []).map(a => {
-              try {
-                const [mimeTypePart, data] = a.split(';base64,');
-                const mimeType = mimeTypePart.split(':')[1];
-                return { inlineData: { mimeType, data } };
-              } catch (e) {
-                console.error("Failed to parse attachment:", a.substring(0, 50));
-                return { text: "[Invalid Attachment]" };
-              }
-            })
-          ]
+          content: m.content,
+          attachments: m.attachments,
         }));
       }
 
-      // Add current message with attachments
-      contents.push({
+      formattedMessages.push({
         role: 'user',
-        parts: [
-          { text: messageText },
-          ...currentAttachments.map(a => {
-            const [mimeTypePart, data] = a.preview.split(';base64,');
-            const mimeType = mimeTypePart.split(':')[1];
-            return { inlineData: { mimeType, data } };
-          })
-        ]
+        content: messageText,
+        attachments: currentAttachments.map(a => a.preview),
       });
 
       const persona = PERSONAS.find(p => p.id === selectedPersonaId) || PERSONAS[0];
-      const responseStream = await ai.models.generateContentStream({
-        model: selectedModelId,
-        contents,
-        config: {
-          tools: tools.length > 0 ? tools : undefined,
-          systemInstruction: persona.instruction,
-          safetySettings: SIERRA_SAFETY_SETTINGS,
-          temperature,
-          topP,
-          topK,
-        },
-      });
-
       let fullContent = "";
       setStreamingContent("");
       setStreamingMetadata(null);
@@ -933,35 +864,47 @@ export default function ChatInterface() {
       });
 
       let chunkCount = 0;
-      for await (const chunk of responseStream) {
-        const text = chunk.text;
-        if (text) {
-          fullContent += text;
-          setStreamingContent(fullContent);
-          
-          const metadata = chunk.candidates?.[0]?.groundingMetadata || null;
-          if (metadata) setStreamingMetadata(metadata);
+      let lastMetadata: any = null;
 
-          chunkCount++;
-          // Update Firestore every 5 chunks to reduce overhead
-          if (chunkCount % 5 === 0) {
-            try {
-              await updateDoc(doc(db, `users/${user.uid}/sessions/${sessionId}/messages`, aiMessageRef.id), {
-                content: fullContent,
-                groundingMetadata: metadata
-              });
-            } catch (error) {
-              handleFirestoreError(error, OperationType.UPDATE, `users/${user.uid}/sessions/${sessionId}/messages/${aiMessageRef.id}`, true);
-            }
+      await new Promise<void>((resolve, reject) => {
+        streamChat(
+          {
+            messages: formattedMessages,
+            systemInstruction: persona.instruction,
+            model: selectedModelId,
+            temperature,
+            topP,
+            topK,
+            useSearch,
+            useMaps,
+          },
+          {
+            onChunk: (chunkText) => {
+              fullContent += chunkText;
+              setStreamingContent(fullContent);
+              chunkCount++;
+              if (chunkCount % 5 === 0) {
+                updateDoc(doc(db, `users/${user.uid}/sessions/${sessionId}/messages`, aiMessageRef.id), {
+                  content: fullContent,
+                  groundingMetadata: lastMetadata
+                }).catch(() => {});
+              }
+            },
+            onMetadata: (metadata) => {
+              lastMetadata = metadata;
+              setStreamingMetadata(metadata);
+            },
+            onDone: () => resolve(),
+            onError: (err) => reject(err),
           }
-        }
-      }
+        );
+      });
 
       // Final update to Firestore
       try {
         await updateDoc(doc(db, `users/${user.uid}/sessions/${sessionId}/messages`, aiMessageRef.id), {
           content: fullContent,
-          groundingMetadata: streamingMetadata
+          groundingMetadata: lastMetadata
         });
       } catch (error) {
         handleFirestoreError(error, OperationType.UPDATE, `users/${user.uid}/sessions/${sessionId}/messages/${aiMessageRef.id}`, true);
@@ -969,9 +912,9 @@ export default function ChatInterface() {
       
       setStreamingContent("");
       setStreamingMetadata(null);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Chat error:", error);
-      toast.error("Failed to get AI response");
+      toast.error(error.message || "Failed to get AI response");
     } finally {
       setIsLoading(false);
     }
@@ -1225,8 +1168,23 @@ export default function ChatInterface() {
             >
               <Settings className="w-4 h-4" />
             </motion.div>
-            <span className="text-xs hidden sm:inline">Settings</span>
+            <span className="text-xs hidden sm:inline">Params</span>
           </Button>
+          {onOpenSettings && (
+            <>
+              <div className="w-px h-4 bg-zinc-800 mx-1" />
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={onOpenSettings}
+                className="gap-1.5 text-zinc-400 hover:text-purple-300 hover:bg-purple-500/10 text-xs transition-colors"
+                title="Configure AI Providers & System Settings"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+                <span className="hidden sm:inline font-medium">Providers</span>
+              </Button>
+            </>
+          )}
         </div>
       </header>
 

@@ -21,6 +21,7 @@ export default function Layout({ children, activeTab, setActiveTab }: LayoutProp
     { id: 'video', icon: Video, label: 'Video' },
     { id: 'live', icon: Mic, label: 'Live' },
     { id: 'integrations', icon: Share2, label: 'Integrations' },
+    { id: 'settings', icon: Settings, label: 'Settings' },
   ];
 
   return (

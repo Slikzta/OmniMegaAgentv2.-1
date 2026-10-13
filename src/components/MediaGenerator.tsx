@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { useAuthState } from 'react-firebase-hooks/auth';
 import { auth } from '../lib/firebase';
-import { getGeminiAI, MODELS, ASPECT_RATIOS, IMAGE_SIZES, VIDEO_RESOLUTIONS, VIDEO_MODELS, VIDEO_FPS } from '../lib/gemini';
 import { Button } from './ui/button';
+import { MODELS, ASPECT_RATIOS, IMAGE_SIZES, VIDEO_RESOLUTIONS, VIDEO_MODELS, VIDEO_FPS } from '../lib/gemini';
+import { generateMediaImage, generateMediaVideo } from '../lib/providers';
 import { Input } from './ui/input';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from './ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
@@ -41,30 +42,22 @@ export default function MediaGenerator() {
     setResultUrl(null);
 
     try {
-      const ai = getGeminiAI();
       const style = STYLE_PERSONAS.find(s => s.id === selectedStyleId);
       const finalPrompt = prompt + (style?.suffix || '');
 
-      const response = await ai.models.generateContent({
+      const imageUrl = await generateMediaImage({
+        prompt: finalPrompt,
+        aspectRatio,
+        imageSize,
+        personGeneration,
         model: MODELS.IMAGE_PRO,
-        contents: { parts: [{ text: finalPrompt }] },
-        config: {
-          imageConfig: {
-            aspectRatio: aspectRatio as any,
-            imageSize: imageSize as any,
-            personGeneration: personGeneration as any,
-          }
-        }
       });
 
-      const imagePart = response.candidates?.[0]?.content?.parts.find(p => p.inlineData);
-      if (imagePart?.inlineData) {
-        setResultUrl(`data:image/png;base64,${imagePart.inlineData.data}`);
-        toast.success("Image generated successfully!");
-      }
-    } catch (error) {
+      setResultUrl(imageUrl);
+      toast.success("Image generated successfully!");
+    } catch (error: any) {
       console.error("Image generation error:", error);
-      toast.error("Failed to generate image.");
+      toast.error(error.message || "Failed to generate image.");
     } finally {
       setIsGenerating(false);
       setProgress(null);
@@ -73,81 +66,44 @@ export default function MediaGenerator() {
 
   const generateVideo = async () => {
     if (!prompt.trim() || isGenerating) return;
-    
-    // Check for API key selection
-    if (!(window as any).aistudio?.hasSelectedApiKey()) {
-      await (window as any).aistudio?.openSelectKey();
-      // Assume success and proceed
-    }
 
     setIsGenerating(true);
-    setProgress(0);
-    setStatusMessage('Initializing Veo Engine...');
+    setProgress(20);
+    setStatusMessage('Synthesizing video on server (this may take up to 60-90 seconds)...');
     setResultUrl(null);
 
     try {
-      const ai = getGeminiAI();
       const style = STYLE_PERSONAS.find(s => s.id === selectedStyleId);
       const finalPrompt = prompt + (style?.suffix || '');
 
-      // Validate 4K resolution for Lite model
       const finalResolution = (videoModel === MODELS.VIDEO && resolution === '4k') ? '1080p' : resolution;
       if (videoModel === MODELS.VIDEO && resolution === '4k') {
         toast.info("Veo Fast supports up to 1080p. Adjusting resolution...");
       }
 
-      setStatusMessage('Sending prompt to neural network...');
-      let operation = await ai.models.generateVideos({
-        model: videoModel,
-        prompt: finalPrompt,
-        config: {
-          numberOfVideos: 1,
-          resolution: finalResolution as any,
-          aspectRatio: aspectRatio as any,
-          fps: fps,
-        }
-      });
-
-      const messages = [
-        'Analyzing prompt semantics...',
-        'Synthesizing initial frames...',
-        'Applying temporal consistency...',
-        'Enhancing visual fidelity...',
-        'Finalizing cinematic render...',
-        'Encoding video stream...'
-      ];
-
-      let msgIndex = 0;
-      while (!operation.done) {
-        setStatusMessage(messages[msgIndex % messages.length]);
-        msgIndex++;
-
+      const progressInterval = setInterval(() => {
         setProgress(prev => {
-          if (prev === null) return 5;
-          if (prev < 95) return prev + Math.floor(Math.random() * 5) + 2;
+          if (prev === null) return 20;
+          if (prev < 90) return prev + 10;
           return prev;
         });
-        
-        await new Promise(resolve => setTimeout(resolve, 8000));
-        operation = await ai.operations.getVideosOperation({ operation: operation });
-      }
+      }, 8000);
 
+      const videoUrl = await generateMediaVideo({
+        prompt: finalPrompt,
+        aspectRatio,
+        resolution: finalResolution,
+        fps,
+        model: videoModel,
+      });
+
+      clearInterval(progressInterval);
       setProgress(100);
-      setStatusMessage('Generation complete! Fetching asset...');
-      const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
-      if (downloadLink) {
-        // Fetch video with API key
-        const apiKey = (process.env as any).GEMINI_API_KEY;
-        const response = await fetch(downloadLink, {
-          headers: { 'x-goog-api-key': apiKey }
-        });
-        const blob = await response.blob();
-        setResultUrl(URL.createObjectURL(blob));
-        toast.success("Video generated successfully!");
-      }
-    } catch (error) {
+      setResultUrl(videoUrl);
+      toast.success("Video generated successfully!");
+    } catch (error: any) {
       console.error("Video generation error:", error);
-      toast.error("Failed to generate video.");
+      toast.error(error.message || "Failed to generate video.");
     } finally {
       setIsGenerating(false);
       setProgress(null);

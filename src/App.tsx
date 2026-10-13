@@ -4,12 +4,12 @@ import ChatInterface from './components/ChatInterface';
 import MediaGenerator from './components/MediaGenerator';
 import LiveVoice from './components/LiveVoice';
 import Integrations from './components/Integrations';
+import SettingsView from './components/Settings';
 import { Toaster } from './components/ui/sonner';
 import { TooltipProvider } from './components/ui/tooltip';
 import { SpeedInsights } from '@vercel/speed-insights/react';
 
 import ErrorBoundary from './components/ErrorBoundary';
-
 import { UIProvider } from './contexts/UIContext';
 
 export default function App() {
@@ -18,7 +18,7 @@ export default function App() {
   const renderContent = () => {
     switch (activeTab) {
       case 'chat':
-        return <ChatInterface />;
+        return <ChatInterface onOpenSettings={() => setActiveTab('settings')} />;
       case 'image':
       case 'video':
         return <MediaGenerator />;
@@ -26,8 +26,10 @@ export default function App() {
         return <LiveVoice />;
       case 'integrations':
         return <Integrations />;
+      case 'settings':
+        return <SettingsView onNavigateToChat={() => setActiveTab('chat')} />;
       default:
-        return <ChatInterface />;
+        return <ChatInterface onOpenSettings={() => setActiveTab('settings')} />;
     }
   };
 
