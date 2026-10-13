@@ -31,7 +31,10 @@ export default function Layout({ children, activeTab, setActiveTab }: LayoutProp
           <div className="w-8 h-8 bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 rounded-lg flex items-center justify-center shadow-lg shadow-purple-500/20">
             <Sparkles className="w-5 h-5 text-white" />
           </div>
-          <span className="font-bold text-xl hidden md:block tracking-tight">OmniAgent</span>
+          <div className="hidden md:block">
+            <span className="font-bold text-xl tracking-tight block">Sierra</span>
+            <span className="text-[10px] font-semibold text-purple-400 block -mt-1 tracking-wider uppercase">AI Companion</span>
+          </div>
         </div>
 
         <nav className="flex-1 px-3 py-4 space-y-2">

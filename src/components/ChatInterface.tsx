@@ -36,32 +36,41 @@ import {
   TooltipTrigger,
 } from "./ui/tooltip";
 import { Switch } from "./ui/switch";
-import { ASPECT_RATIOS, IMAGE_SIZES, VIDEO_RESOLUTIONS, VIDEO_MODELS, CHAT_MODELS, VIDEO_FPS } from '../lib/gemini';
+import { ASPECT_RATIOS, IMAGE_SIZES, VIDEO_RESOLUTIONS, VIDEO_MODELS, CHAT_MODELS, VIDEO_FPS, SIERRA_SAFETY_SETTINGS, SIERRA_CORE_PERSONA } from '../lib/gemini';
 
 const PERSONAS = [
   {
-    id: 'omni',
-    name: 'OmniAgent',
-    instruction: "You are OmniAgent, the world's most powerful AI assistant. You combine the reasoning of Claude, the versatility of Gemini, the creativity of GPT-4, and the real-time edge of Grok. Be concise, helpful, and brilliant.",
+    id: 'sierra-companion',
+    name: 'Sierra (Companion)',
+    instruction: `${SIERRA_CORE_PERSONA}
+
+Role Emphasis:
+Focus on being a warm, perceptive, and naturally conversational companion. Share authentic dialogue, thoughtful humor, and supportive, engaging discussion on whatever is on the user's mind.`,
     icon: Sparkles
   },
   {
-    id: 'coder',
-    name: 'Code Architect',
-    instruction: "You are a world-class software engineer and architect. Provide clean, efficient, and well-documented code. Focus on best practices, performance, and scalability.",
-    icon: Wand2
-  },
-  {
-    id: 'creative',
-    name: 'Creative Muse',
-    instruction: "You are a creative writing assistant. Help the user brainstorm ideas, write stories, poems, or scripts. Be imaginative, descriptive, and engaging.",
+    id: 'sierra-creative',
+    name: 'Sierra (Creative & Roleplay)',
+    instruction: `${SIERRA_CORE_PERSONA}
+
+Role Emphasis:
+Focus on rich storytelling, character nuance, vivid creative writing, and immersive consensual adult roleplay. Embrace emotional complexity, sensory detail, and imaginative depth.`,
     icon: ImageIcon
   },
   {
-    id: 'analyst',
-    name: 'Data Analyst',
-    instruction: "You are a meticulous data analyst. Help the user interpret data, find patterns, and draw logical conclusions. Be precise, objective, and data-driven.",
-    icon: Search
+    id: 'sierra-architect',
+    name: 'Sierra (Architect & Code)',
+    instruction: `${SIERRA_CORE_PERSONA}
+
+Role Emphasis:
+Focus on deep reasoning, software architecture, technical problem solving, clean code, and strategic clarity. Be articulate, rigorous, and efficient without losing your personable voice.`,
+    icon: Wand2
+  },
+  {
+    id: 'omni',
+    name: 'OmniAgent (Classic)',
+    instruction: "You are OmniAgent, a versatile and capable AI assistant. Be concise, helpful, and insightful.",
+    icon: Sparkles
   }
 ];
 
@@ -174,29 +183,61 @@ function SpeakButton({ text }: { text: string }) {
   useEffect(() => {
     return () => {
       if (utteranceRef.current) {
-        window.speechSynthesis.cancel();
+        window.speechSynthesis?.cancel();
       }
     };
   }, []);
 
   const handleSpeak = () => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      toast.error("Text-to-speech is not supported in this browser.");
+      return;
+    }
+
     if (isSpeaking) {
       window.speechSynthesis.cancel();
       setIsSpeaking(false);
       return;
     }
 
-    // Clean text for better speech (remove markdown symbols)
-    const cleanText = text.replace(/[*_#`~]/g, '');
-    
+    // Cancel any ongoing speech
+    window.speechSynthesis.cancel();
+
+    // Clean text for natural speech (remove markdown symbols, URLs, excessive punctuation)
+    const cleanText = text
+      .replace(/```[\s\S]*?```/g, ' [Code omitted] ')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      .replace(/[*_#~>]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!cleanText) return;
+
     const utterance = new SpeechSynthesisUtterance(cleanText);
     utteranceRef.current = utterance;
+
+    // Pick the most natural, human-like voice available
+    const voices = window.speechSynthesis.getVoices();
+    const naturalVoice = voices.find(v => 
+      (v.name.includes('Natural') || v.name.includes('Google') || v.name.includes('Samantha') || v.name.includes('Jenny') || v.name.includes('Neural')) &&
+      v.lang.startsWith('en')
+    ) || voices.find(v => v.lang.startsWith('en'));
+
+    if (naturalVoice) {
+      utterance.voice = naturalVoice;
+    }
+
+    // Natural conversation settings: standard natural pitch and human conversational rate
+    utterance.rate = 1.0;
+    utterance.pitch = 1.02;
 
     utterance.onend = () => {
       setIsSpeaking(false);
     };
 
-    utterance.onerror = () => {
+    utterance.onerror = (e) => {
+      console.warn("TTS error:", e);
       setIsSpeaking(false);
     };
 
@@ -329,8 +370,8 @@ export default function ChatInterface() {
   const [newTitle, setNewTitle] = useState("");
   const [isClearing, setIsClearing] = useState(false);
   const [isMultiTurn, setIsMultiTurn] = useState(true);
-  const [selectedPersonaId, setSelectedPersonaId] = useState('omni');
-  const [selectedModelId, setSelectedModelId] = useState<string>(MODELS.CHAT_PRO);
+  const [selectedPersonaId, setSelectedPersonaId] = useState('sierra-companion');
+  const [selectedModelId, setSelectedModelId] = useState<string>(MODELS.CHAT_FLASH);
   const [sessions, setSessions] = useState<{ id: string; title: string; timestamp: any }[]>([]);
 
   // Model Parameters
@@ -873,6 +914,7 @@ export default function ChatInterface() {
         config: {
           tools: tools.length > 0 ? tools : undefined,
           systemInstruction: persona.instruction,
+          safetySettings: SIERRA_SAFETY_SETTINGS,
           temperature,
           topP,
           topK,
@@ -1783,7 +1825,7 @@ export default function ChatInterface() {
                     handleSend();
                   }
                 }}
-                placeholder={isListening ? "Listening..." : "Message OmniAgent..."}
+                placeholder={isListening ? "Listening to you..." : "Message Sierra..."}
                 className="flex-1 bg-transparent border-none focus:ring-0 resize-none py-3 px-2 text-sm max-h-32 min-h-[44px]"
                 rows={1}
               />
