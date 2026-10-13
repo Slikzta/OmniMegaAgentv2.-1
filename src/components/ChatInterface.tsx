@@ -662,11 +662,11 @@ export default function ChatInterface() {
     const timer = setTimeout(async () => {
       try {
         const sessionDocRef = doc(db, `users/${user.uid}/sessions/${sessionId}`);
-        await updateDoc(sessionDocRef, {
+        await setDoc(sessionDocRef, {
           temperature,
           topP,
           topK
-        });
+        }, { merge: true });
       } catch (error) {
         console.error("Error persisting parameters:", error);
       }
