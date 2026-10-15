@@ -833,7 +833,8 @@ async function startServer() {
       return res.status(500).json({ error: "GITHUB_CLIENT_ID not configured" });
     }
 
-    const redirectUri = `${process.env.APP_URL}/auth/github/callback`;
+    const baseUrl = process.env.APP_URL || `${req.protocol}://${req.get("host")}`;
+    const redirectUri = `${baseUrl}/auth/github/callback`;
     const params = new URLSearchParams({
       client_id: clientId,
       redirect_uri: redirectUri,
@@ -851,7 +852,8 @@ async function startServer() {
     }
 
     try {
-      const redirectUri = `${process.env.APP_URL}/auth/github/callback`;
+      const baseUrl = process.env.APP_URL || `${req.protocol}://${req.get("host")}`;
+      const redirectUri = `${baseUrl}/auth/github/callback`;
       const response = await fetch("https://github.com/login/oauth/access_token", {
         method: "POST",
         headers: {
