@@ -17,12 +17,12 @@ const isProduction = process.env.NODE_ENV === "production";
 const rawSessionSecret = process.env.SESSION_SECRET;
 
 if (isProduction && (!rawSessionSecret || rawSessionSecret.includes("omniagent") || rawSessionSecret.length < 16)) {
-  console.error("FATAL: In production, SESSION_SECRET environment variable must be set to a secure string of at least 16 characters.");
-  process.exit(1);
+  console.warn("WARN: SESSION_SECRET is not set or under 16 characters. Generating secure ephemeral session secret.");
 }
 
-// In development, generate a non-hardcoded ephemeral fallback suitable for development
-const sessionSecret = rawSessionSecret || crypto.randomBytes(32).toString("hex");
+const sessionSecret = (rawSessionSecret && rawSessionSecret.length >= 16 && !rawSessionSecret.includes("omniagent")) 
+  ? rawSessionSecret 
+  : crypto.randomBytes(32).toString("hex");
 
 // Server-side provider memory store (keyed by session or default)
 interface ProviderConfig {
